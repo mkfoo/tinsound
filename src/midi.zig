@@ -80,7 +80,7 @@ pub const MidiEvent = struct {
 pub const MidiTrack = struct {
     reader: Cursor,
     clock: u32,
-    delta: u32,
+    next: u32,
     event: MidiEvent,
 
     const Self = @This();
@@ -99,7 +99,7 @@ pub const MidiTrack = struct {
         var self = Self{
             .reader = Cursor.new(trk_data),
             .clock = 0,
-            .delta = 0,
+            .next = 0,
             .event = MidiEvent{
                 .status = 0,
             },
@@ -109,12 +109,16 @@ pub const MidiTrack = struct {
         return self;
     }
 
-    pub fn advance(self: *Self) void {
-        self.clock += 1;
+    pub fn advance(self: *Self, ticks: u32) void {
+        self.clock += ticks;
+    }
+
+    pub fn get_delta(self: *Self) u32 {
+        return self.next - self.clock;
     }
 
     pub fn get_event(self: *Self) ?MidiEvent {
-        if (self.clock >= self.delta) {
+        if (self.clock == self.next) {
             const event = self.event;
 
             if (event.status != END_OF_TRACK) {
@@ -129,7 +133,7 @@ pub const MidiTrack = struct {
 
     fn read_next_event(self: *Self) void {
         self.clock = 0;
-        self.delta = self.read_var_len();
+        self.next = self.read_var_len();
         const byte0: u8 = self.reader.read_u8();
 
         switch (byte0) {
@@ -194,13 +198,13 @@ pub const MidiSequencer = struct {
     header: MidiHeader,
     tracks: []MidiTrack,
     spt: u32,
-    sc: u32,
+    rem: u32,
 
     const Self = @This();
     const DefaultTempo: u32 = 500000;
 
-    fn samples_per_tick(tempo_ms: u32, time_div: u16, smplrate: u32) u32 {
-        const ms = @intToFloat(f32, tempo_ms);
+    fn samples_per_tick(tempo: u32, time_div: u16, smplrate: u32) u32 {
+        const ms = @intToFloat(f32, tempo);
         const div = @intToFloat(f32, time_div);
         const sr = @intToFloat(f32, smplrate);
         return @floatToInt(u32, ms / div / (1000000.0 / sr));
@@ -219,20 +223,33 @@ pub const MidiSequencer = struct {
             .header = header,
             .tracks = tracks,
             .spt = samples_per_tick(DefaultTempo, header.div, sr),
-            .sc = 0,
+            .rem = 0,
         };
     }
 
-    pub fn advance(self: *Self) void {
-        self.sc += 1;
+    pub fn advance(self: *Self, samples: u32) u32 {
+        const count = self.rem + samples;
+        const ticks = count / self.spt;
 
-        if (self.sc == self.spt) {
-            self.sc = 0;
+        if (ticks > 0) {
+            var delta: u32 = ticks;
 
             for (self.tracks) |*trk| {
-                trk.advance();
+                delta = @minimum(delta, trk.get_delta());
+            }
+
+            for (self.tracks) |*trk| {
+                trk.advance(delta);
+            }
+
+            if (delta < ticks) {
+                self.rem = 0;
+                return delta * self.spt;
             }
         }
+
+        self.rem = count % self.spt;
+        return samples;
     }
 
     pub fn get_event(self: *Self) ?MidiEvent {
@@ -369,7 +386,7 @@ test "format0" {
     var count: usize = 0;
 
     while (status != END_OF_TRACK) {
-        seq.advance();
+        _ = seq.advance(128);
 
         while (seq.get_event()) |event| {
             status = event.status;
@@ -461,7 +478,7 @@ test "format1" {
     var count: usize = 0;
 
     while (status != END_OF_TRACK) {
-        seq.advance();
+        _ = seq.advance(128);
 
         while (seq.get_event()) |event| {
             status = event.status;
