@@ -33,6 +33,7 @@ pub fn Synth(comptime spec: *const AudioSpec, comptime nvoices: usize) type {
         gain: f32,
         midi: MidiSeq,
         voices: [nvoices]Voice,
+        rem: u32,
 
         const Self = @This();
         pub const Spec = spec;
@@ -48,12 +49,14 @@ pub fn Synth(comptime spec: *const AudioSpec, comptime nvoices: usize) type {
                     Voice.new(sr),
                     Voice.new(sr),
                 },
+                .rem = 0,
             };
         }
 
         pub fn generate(self: *Self, writer: anytype, samples: u32) !void {
             const typ = Spec.sample_type;
             const end = Spec.endian;
+            const chs = Spec.channels;
             const max = std.math.maxInt(typ);
             var i: u32 = 0;
 
@@ -66,16 +69,18 @@ pub fn Synth(comptime spec: *const AudioSpec, comptime nvoices: usize) type {
 
                 const fmax = @intToFloat(f32, max);
                 const val = @floatToInt(typ, fmax * sample * self.gain);
-                try writer.writeInt(typ, val, end);
+                var j: u16 = 0;
+
+                while (j < chs) : (j += 1) {
+                    try writer.writeInt(typ, val, end);
+                }
             }
         }
 
         pub fn render(self: *Self, writer: anytype, samples: u32) !bool {
-            var rem: u32 = samples;
+            var rem = samples + self.rem;
 
-            while (rem > 0) {
-                const adv = self.midi.advance(rem);
-
+            while (true) {
                 while (self.midi.get_event()) |event| {
                     if (event.status == midi.END_OF_TRACK)
                         return false;
@@ -83,10 +88,15 @@ pub fn Synth(comptime spec: *const AudioSpec, comptime nvoices: usize) type {
                     self.handle_event(event);
                 }
 
+                const adv = self.midi.advance(rem);
                 try self.generate(writer, adv);
                 rem -= adv;
+
+                if (rem < self.midi.spt)
+                    break;
             }
 
+            self.rem = rem;
             return true;
         }
 
@@ -94,7 +104,7 @@ pub fn Synth(comptime spec: *const AudioSpec, comptime nvoices: usize) type {
             var playing = true;
 
             while (playing) {
-                playing = try self.render(writer, 256);
+                playing = try self.render(writer, 1);
             }
         }
 
@@ -102,7 +112,7 @@ pub fn Synth(comptime spec: *const AudioSpec, comptime nvoices: usize) type {
             const typ: u8 = event.status & 0xf0;
             const chn: u8 = event.status & 0x0f;
 
-            std.debug.print("{} {} {} {}\n", .{ typ, chn, event.data1, event.data2 });
+            //std.debug.print("{x} {x} {x}\n", .{ event.status, event.data1, event.data2 });
 
             switch (typ) {
                 midi.NOTE_OFF => {

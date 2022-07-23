@@ -82,6 +82,8 @@ pub const MidiTrack = struct {
     clock: u32,
     next: u32,
     event: MidiEvent,
+    tempo: u24,
+    end: bool,
 
     const Self = @This();
 
@@ -103,6 +105,8 @@ pub const MidiTrack = struct {
             .event = MidiEvent{
                 .status = 0,
             },
+            .tempo = 0,
+            .end = false,
         };
 
         self.read_next_event();
@@ -113,18 +117,20 @@ pub const MidiTrack = struct {
         self.clock += ticks;
     }
 
-    pub fn get_delta(self: *Self) u32 {
+    pub fn delta(self: *Self) u32 {
         return self.next - self.clock;
     }
 
     pub fn get_event(self: *Self) ?MidiEvent {
-        if (self.clock == self.next) {
+        if (self.delta() == 0) {
             const event = self.event;
 
-            if (event.status != END_OF_TRACK) {
-                self.read_next_event();
+            if (event.status == END_OF_TRACK) {
+                self.end = true;
+                return null;
             }
 
+            self.read_next_event();
             return event;
         }
 
@@ -173,11 +179,19 @@ pub const MidiTrack = struct {
     }
 
     fn read_meta(self: *Self) void {
-        self.event.status = self.reader.read_u8();
+        const status = self.reader.read_u8();
+        const len: u32 = self.read_var_len();
+
+        if (status == SET_TEMPO and len == 3) {
+            const s = self.reader.slice(len);
+            self.tempo = std.mem.readIntSliceBig(u24, s);
+        } else {
+            self.reader.skip(len);
+        }
+
+        self.event.status = status;
         self.event.data1 = 0;
         self.event.data2 = 0;
-        const len: u32 = self.read_var_len();
-        self.reader.skip(len);
     }
 
     fn read_var_len(self: *Self) u32 {
@@ -197,13 +211,13 @@ pub const MidiTrack = struct {
 pub const MidiSequencer = struct {
     header: MidiHeader,
     tracks: []MidiTrack,
+    sr: u32,
     spt: u32,
-    rem: u32,
 
     const Self = @This();
-    const DefaultTempo: u32 = 500000;
+    const DefaultTempo: u24 = 500000;
 
-    fn samples_per_tick(tempo: u32, time_div: u16, smplrate: u32) u32 {
+    fn samples_per_tick(tempo: u24, time_div: u16, smplrate: u32) u32 {
         const ms = @intToFloat(f32, tempo);
         const div = @intToFloat(f32, time_div);
         const sr = @intToFloat(f32, smplrate);
@@ -222,51 +236,48 @@ pub const MidiSequencer = struct {
         return Self{
             .header = header,
             .tracks = tracks,
+            .sr = sr,
             .spt = samples_per_tick(DefaultTempo, header.div, sr),
-            .rem = 0,
         };
     }
 
     pub fn advance(self: *Self, samples: u32) u32 {
-        const count = self.rem + samples;
-        const ticks = count / self.spt;
+        var min_delta = samples / self.spt;
 
-        if (ticks > 0) {
-            var delta: u32 = ticks;
-
-            for (self.tracks) |*trk| {
-                delta = @minimum(delta, trk.get_delta());
-            }
-
-            for (self.tracks) |*trk| {
-                trk.advance(delta);
-            }
-
-            if (delta < ticks) {
-                self.rem = 0;
-                return delta * self.spt;
-            }
+        for (self.tracks) |*trk| {
+            min_delta = @minimum(min_delta, trk.delta());
         }
 
-        self.rem = count % self.spt;
-        return samples;
+        for (self.tracks) |*trk| {
+            trk.advance(min_delta);
+        }
+
+        return min_delta * self.spt;
     }
 
     pub fn get_event(self: *Self) ?MidiEvent {
         var at_end: u32 = 0;
 
         for (self.tracks) |*trk| {
+            at_end += @boolToInt(trk.end);
+
             if (trk.get_event()) |event| {
                 switch (event.status) {
-                    END_OF_TRACK => at_end += 1,
+                    SET_TEMPO => {
+                        if (trk.tempo > 0) {
+                            self.spt = samples_per_tick(trk.tempo, self.header.div, self.sr);
+                        }
+
+                        return event;
+                    },
+
                     else => return event,
                 }
             }
         }
 
-        if (at_end == self.tracks.len) {
+        if (at_end == self.tracks.len)
             return MidiEvent{ .status = END_OF_TRACK };
-        }
 
         return null;
     }
@@ -386,7 +397,7 @@ test "format0" {
     var count: usize = 0;
 
     while (status != END_OF_TRACK) {
-        _ = seq.advance(128);
+        _ = seq.advance(4096);
 
         while (seq.get_event()) |event| {
             status = event.status;
@@ -478,7 +489,7 @@ test "format1" {
     var count: usize = 0;
 
     while (status != END_OF_TRACK) {
-        _ = seq.advance(128);
+        _ = seq.advance(4096);
 
         while (seq.get_event()) |event| {
             status = event.status;
