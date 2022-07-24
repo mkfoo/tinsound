@@ -14,8 +14,8 @@ pub fn main() !void {
     const wavpath = try std.fmt.allocPrint(alloc, "{s}.wav", .{midipath});
     var wavfile = try WavFile.new(wavpath, &DefaultSpec);
     var writer = wavfile.writer();
-    var synth = try Synth(&DefaultSpec, 3).load(alloc, mididata);
-    try synth.render_all(&writer);
+    var synth = try Synth(&DefaultSpec, 3, 4).new(alloc);
+    try synth.render_midi_file(&writer, mididata);
     try wavfile.finish();
     arena.deinit();
 }

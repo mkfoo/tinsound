@@ -114,7 +114,7 @@ pub const MidiTrack = struct {
     }
 
     pub fn advance(self: *Self, ticks: u32) void {
-        self.clock += ticks;
+        self.clock += ticks * @boolToInt(!self.end);
     }
 
     pub fn delta(self: *Self) u32 {
@@ -208,7 +208,7 @@ pub const MidiTrack = struct {
     }
 };
 
-pub const MidiSequencer = struct {
+pub const MidiSeq = struct {
     header: MidiHeader,
     tracks: []MidiTrack,
     sr: u32,
@@ -224,7 +224,7 @@ pub const MidiSequencer = struct {
         return @floatToInt(u32, ms / div / (1000000.0 / sr));
     }
 
-    pub fn new(alloc: Allocator, sr: u32, mididata: []const u8) !Self {
+    pub fn new(alloc: Allocator, sr: u32, mididata: []const u8) !*Self {
         var reader = Cursor.new(mididata);
         const header = try MidiHeader.new(&reader);
         const tracks = try alloc.alloc(MidiTrack, header.ntrks);
@@ -233,19 +233,20 @@ pub const MidiSequencer = struct {
             trk.* = try MidiTrack.new(&reader);
         }
 
-        return Self{
-            .header = header,
-            .tracks = tracks,
-            .sr = sr,
-            .spt = samples_per_tick(DefaultTempo, header.div, sr),
-        };
+        var self: *Self = try alloc.create(Self);
+        self.header = header;
+        self.tracks = tracks;
+        self.sr = sr;
+        self.spt = samples_per_tick(DefaultTempo, header.div, sr);
+        return self;
     }
 
     pub fn advance(self: *Self, samples: u32) u32 {
         var min_delta = samples / self.spt;
 
         for (self.tracks) |*trk| {
-            min_delta = @minimum(min_delta, trk.delta());
+            if (!trk.end)
+                min_delta = @minimum(min_delta, trk.delta());
         }
 
         for (self.tracks) |*trk| {
@@ -388,7 +389,7 @@ test "format0" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
-    var seq = try MidiSequencer.new(allocator, 44100, &FILE0);
+    var seq = try MidiSeq.new(allocator, 44100, &FILE0);
     try std.testing.expect(seq.header.fmt == 0);
     try std.testing.expect(seq.header.ntrks == 1);
     try std.testing.expect(seq.header.div == 96);
@@ -480,7 +481,7 @@ test "format1" {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
-    var seq = try MidiSequencer.new(allocator, 44100, &FILE1);
+    var seq = try MidiSeq.new(allocator, 44100, &FILE1);
     try std.testing.expect(seq.header.fmt == 1);
     try std.testing.expect(seq.header.ntrks == 4);
     try std.testing.expect(seq.header.div == 96);
